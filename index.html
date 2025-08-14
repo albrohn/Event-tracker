@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Event Tracker Calendar</title>
+<style>
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    background: #000;
+    color: #ddd;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .controls {
+    margin: 18px 0;
+    display: flex;
+    gap: 10px;
+  }
+  button {
+    background: #111;
+    color: #fff;
+    border: 1px solid #333;
+    padding: 8px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  input[type="file"] { display: none; }
+
+  #calendar {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: #000;
+    z-index: 9999;
+    overflow: auto;
+    padding: 2px 10px;
+    box-sizing: border-box;
+    color: #ddd;
+  }
+
+  .calendar-panel { max-width: 1100px; margin: 0 auto; }
+
+  .calendar-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 5px; margin-top: 0px;
+  }
+  .year-title {
+    font-size: 20px; font-weight: 700; text-align: center; flex: 1; color: #fff; letter-spacing: 1px;
+  }
+  .nav-btn {
+    width: 44px; height: 35px; font-size: 15px; background: transparent;
+    border: 1px solid #333; color: #fff; border-radius: 8px;
+  }
+
+  .months-container {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 8px; justify-items: center;
+  }
+
+  /* More robust month layout using CSS grid */
+  .month {
+    width: 100%;
+    background: #000;
+    color: #fff;
+    padding: 6px;
+    border-radius: 5px;
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 2px;
+    border: 1px solid #222;
+  }
+
+  .month-name {
+    grid-column: 1 / -1;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    text-align: center;
+    margin-bottom: 2px;
+    letter-spacing: 1px;
+    color: #fff;
+  }
+
+  .day-header {
+    text-align: center;
+    font-weight: 600;
+    font-size: 11px;
+    color: #f4ff32;
+  }
+
+  .calendar-day {
+    text-align: center;
+    font-size: 10px;
+    height: 18px;
+    line-height: 18px;
+    color: #d9f3f4;
+  }
+
+  .saturday, .sunday { color: #ff5c5c; }
+
+  .highlight {
+    background: #2f8f3f;
+    color: #fff;
+    border-radius: 50%;
+    padding: 0 4px;
+  }
+
+  .close-btn { margin-top: 1px; background: #7a0000; border: 1px solid #b40000; }
+</style>
+</head>
+<body>
+
+<div class="controls">
+  <button id="uploadBtn">Choose CSV File</button>
+  <input type="file" id="fileInput" accept=".csv"/>
+  <button id="toggleCalendarBtn">Show Calendar</button>
+</div>
+
+<!-- Main page lists -->
+<div id="eventList" style="margin:10px; font-size:12px; color:#fff; max-width:500px;"></div>
+<div id="todoList"  style="margin:10px; font-size:12px; color:#fff; max-width:500px;"></div>
+
+<!-- Calendar -->
+<div id="calendar">
+  <div class="calendar-panel">
+    <div class="calendar-header">
+      <button id="prevYear" class="nav-btn">&lt;</button>
+      <div id="yearTitle" class="year-title"></div>
+      <button id="nextYear" class="nav-btn">&gt;</button>
+    </div>
+    <div class="months-container"></div>
+    <div style="text-align:center;">
+      <button class="close-btn" id="closeCalendar">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let displayedYear = new Date().getFullYear();
+let events = [];
+let todos = [];
+
+/* ---------- Helpers (hardened parsing) ---------- */
+function stripWeirdSpaces(s) {
+  // remove BOM, zero-width chars, non-breaking spaces
+  return (s || "")
+    .replace(/^\uFEFF/, "")
+    .replace(/[\u200B-\u200D\u2060]/g, "")
+    .replace(/\u00A0/g, " ");
+}
+function normalizeMarker(str) {
+  let s = stripWeirdSpaces(str).trim();
+  s = s.replace(/^[\'"\u2018\u2019\u201C\u201D]+|[\'"\u2018\u2019\u201C\u201D]+$/g, ""); // outer quotes
+  s = s.replace(/[\u2013\u2014]/g, "-"); // en/em dash -> hyphen
+  s = s.replace(/\s*:\s*$/, ""); // trailing colon
+  s = s.toUpperCase();
+  // Collapse non-letters so "TO-DO", "TO DO", "TODO" all normalize to "TODO"
+  const lettersOnly = s.replace(/[^A-Z]/g, "");
+  return { raw: s, lettersOnly };
+}
+function isEventLine(line) {
+  // Starts with date then comma
+  return /^\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}\s*,/.test(line);
+}
+function splitDateTitle(line) {
+  // Split at first comma only to allow commas inside title
+  const m = line.match(/^\s*([^,]+)\s*,\s*(.+)$/);
+  return m ? [m[1], m[2]] : null;
+}
+function toMidnight(d) {
+  const x = new Date(d);
+  x.setHours(0,0,0,0);
+  return x;
+}
+
+/* ---------- File handling ---------- */
+document.getElementById('uploadBtn').addEventListener('click', () => {
+  document.getElementById('fileInput').click();
+});
+document.getElementById('fileInput').addEventListener('change', (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const rawText = e.target.result || "";
+    // Handle \r\n, \n, or lone \r
+    const rawLines = rawText.split(/\r\n|\n|\r/);
+
+    events = [];
+    todos  = [];
+
+    let mode = "events"; // default until marker switches it
+
+    for (let raw of rawLines) {
+      if (!raw) continue;
+      const line = stripWeirdSpaces(raw).trim();
+      if (!line) continue;
+
+      const { raw: markRaw, lettersOnly } = normalizeMarker(line);
+
+      // Section markers
+      if (lettersOnly === "EVENTLIST" || lettersOnly === "EVENTS") {
+        mode = "events"; continue;
+      }
+      if (lettersOnly === "TODO") {
+        mode = "todos"; continue;
+      }
+
+      if (mode === "events") {
+        if (!isEventLine(line)) continue;
+
+        const clean = line.replace(/^[\'"\u2018\u2019\u201C\u201D]+|[\'"\u2018\u2019\u201C\u201D]+$/g, "");
+        const parts = splitDateTitle(clean);
+        if (!parts) continue;
+
+        const dateStr = parts[0].trim();
+        const title   = parts[1].trim();
+        const date = new Date(dateStr);
+        if (!isNaN(date.valueOf())) events.push({ date, title });
+      } else {
+        // TO-DO lines: drop bullet prefixes and quotes
+        const task = line
+          .replace(/^[\-\*\u2022]\s*/, "")
+          .replace(/^[\'"\u2018\u2019\u201C\u201D]+|[\'"\u2018\u2019\u201C\u201D]+$/g, "")
+          .trim();
+        if (task) todos.push(task);
+      }
+    }
+
+    showEventList();
+    showTodoList();
+  };
+  reader.readAsText(file);
+});
+
+/* ---------- Lists rendering ---------- */
+function showEventList() {
+  const eventListDiv = document.getElementById('eventList');
+  if (events.length === 0) {
+    eventListDiv.innerHTML = "<em>No events loaded</em>";
+    return;
+  }
+
+  // Newest first
+  events.sort((a, b) => b.date - a.date);
+
+  const today = toMidnight(new Date());
+  const msPerDay = 86400000;
+
+  let html = "<h4>Event List</h4><ul style='padding-left:15px; list-style:none;'>";
+  for (const ev of events) {
+    const d = toMidnight(ev.date);
+    const delta = Math.floor((today - d) / msPerDay);
+    const whenStr = delta >= 0 ? `${delta} days` : `in ${Math.abs(delta)} days`;
+    const dateStr = `${ev.date.toLocaleString('default', { month: 'short' })} ${String(ev.date.getDate()).padStart(2,'0')} ${ev.date.getFullYear()}`;
+    html += `<li><strong>${dateStr}</strong> — ${ev.title} <span style="color:#aaa;">(${whenStr})</span></li>`;
+  }
+  html += "</ul>";
+  eventListDiv.innerHTML = html;
+}
+
+function showTodoList() {
+  const todoDiv = document.getElementById('todoList');
+  if (todos.length === 0) {
+    todoDiv.innerHTML = "<em>No tasks in to-do list</em>";
+    return;
+  }
+
+  let html = "<h4>To-Do List</h4><ul style='padding-left:15px;'>";
+  for (const task of todos) html += `<li>${task}</li>`;
+  html += "</ul>";
+  todoDiv.innerHTML = html;
+}
+
+/* ---------- Calendar controls ---------- */
+document.getElementById('toggleCalendarBtn').addEventListener('click', () => {
+  showCalendar(displayedYear);
+});
+document.getElementById('prevYear').addEventListener('click', () => {
+  displayedYear--; showCalendar(displayedYear);
+});
+document.getElementById('nextYear').addEventListener('click', () => {
+  displayedYear++; showCalendar(displayedYear);
+});
+document.getElementById('closeCalendar').addEventListener('click', () => {
+  document.getElementById('calendar').style.display = 'none';
+});
+
+/* ---------- Calendar rendering ---------- */
+function showCalendar(year) {
+  const calendar = document.getElementById('calendar');
+  const monthsContainer = calendar.querySelector('.months-container');
+  const yearTitle = document.getElementById('yearTitle');
+  monthsContainer.innerHTML = '';
+  yearTitle.textContent = year;
+
+  const today = toMidnight(new Date());
+  const dayHeaders = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+  for (let month = 0; month < 12; month++) {
+    const monthDiv = document.createElement('div');
+    monthDiv.className = 'month';
+
+    const monthName = new Date(year, month).toLocaleString('default', { month: 'long' }).toUpperCase();
+    const titleDiv = document.createElement('div');
+    titleDiv.className = 'month-name';
+    titleDiv.textContent = monthName;
+    monthDiv.appendChild(titleDiv);
+
+    // Headers
+    dayHeaders.forEach((header, idx) => {
+      const headerDiv = document.createElement('div');
+      headerDiv.className = 'day-header';
+      headerDiv.textContent = header.charAt(0);
+      if (idx === 0) headerDiv.classList.add('sunday');
+      if (idx === 6) headerDiv.classList.add('saturday');
+      monthDiv.appendChild(headerDiv);
+    });
+
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const firstDayIndex = new Date(year, month, 1).getDay();
+
+    // Empty cells before day 1
+    for (let i = 0; i < firstDayIndex; i++) {
+      const emptyDiv = document.createElement('div');
+      emptyDiv.className = 'calendar-day';
+      emptyDiv.textContent = '';
+      monthDiv.appendChild(emptyDiv);
+    }
+
+    // Days
+    for (let day = 1; day <= daysInMonth; day++) {
+      const date = new Date(year, month, day);
+      const dayDiv = document.createElement('div');
+      dayDiv.className = 'calendar-day';
+      if (date.getDay() === 0) dayDiv.classList.add('sunday');
+      if (date.getDay() === 6) dayDiv.classList.add('saturday');
+
+      const hasEvent = events.some(ev => toMidnight(ev.date).toDateString() === toMidnight(date).toDateString());
+      if (hasEvent || toMidnight(date).getTime() === today.getTime()) {
+        const span = document.createElement('span');
+        span.className = 'highlight';
+        span.textContent = day;
+        dayDiv.appendChild(span);
+      } else {
+        dayDiv.textContent = day;
+      }
+      monthDiv.appendChild(dayDiv);
+    }
+    monthsContainer.appendChild(monthDiv);
+  }
+
+  calendar.style.display = 'block';
+}
+</script>
+</body>
+</html>
